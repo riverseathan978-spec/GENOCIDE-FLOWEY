@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GENOCIDE FLOWEY — Mini Fan Scene</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{
+      --bg:#0b0b0d;
+      --panel:#0f1113;
+      --accent:#ffcc00;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:#eee;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+    #game-wrap{display:flex;align-items:center;justify-content:center;height:100%;padding:12px;box-sizing:border-box;}
+    canvas{background:linear-gradient(180deg,#050507 0%, #0b0b0d 40%);border-radius:12px;box-shadow:0 10px 40px rgba(0,0,0,0.6);width:100%;max-width:980px;height:620px;display:block;}
+    .ui{
+      position: absolute;left:20px;top:20px;color:#ddd;z-index:10;
+      font-size:14px;background:rgba(0,0,0,0.35);padding:8px;border-radius:8px;
+      backdrop-filter: blur(4px);
+    }
+    .ui b{color:var(--accent)}
+    .center-text{
+      position:absolute;left:50%;top:10%;transform:translateX(-50%);z-index:11;text-align:center;
+      font-size:18px;background:rgba(0,0,0,0.45);padding:10px;border-radius:10px;
+    }
+    .hint{opacity:0.9;font-size:13px}
+    footer { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); color: #888; font-size:12px; z-index:11; }
+    button{cursor:pointer}
+  </style>
+</head>
+<body>
+<div id="game-wrap">
+  <canvas id="c" width="1280" height="800"></canvas>
+  <div class="ui" id="ui">
+    <div>Slash count: <b id="slashCount">0</b>/5</div>
+    <div style="margin-top:4px">Souls remaining: <b id="soulsLeft">6</b></div>
+    <div style="margin-top:6px" class="hint">Click near Flowey to slash. Watch the sequence after 5 slashes.</div>
+    <div style="margin-top:8px"><button id="reset">Reset</button></div>
+  </div>
+  <div class="center-text" id="centerText">GENOCIDE FLOWEY — click near the flower to slash</div>
+  <footer>Built for fun — tweak visuals & sounds in the code.</footer>
+</div>
+
+<script>
+/*
+GENOCIDE FLOWEY
+Self-contained HTML/JS canvas mini-scene.
+
+Controls:
+ - Click near Flowey's center to "slash".
+ - After 5 slashes, Flowey falls through the floor, absorbs 6 souls, and transforms.
+ - Reset button restarts.
+
+Author: ChatGPT (fan-created code)
+*/
+
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  // Canvas sizing
+  function resize() {
+    const ratio = canvas.width / canvas.height;
+    const maxW = Math.min(window.innerWidth - 40, 1280);
+    const w = maxW;
+    const h = Math.round(w / ratio);
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // UI elements
+  const slashCountEl = document.getElementById('slashCount');
+  const soulsLeftEl = document.getElementById('soulsLeft');
+  const centerText = document.getElementById('centerText');
+  document.getElementById('reset').addEventListener('click', init);
+
+  // Game state
+  const state = {
+    slashCount: 0,
+    soulsTotal: 6,
+    soulsLeft: 6,
+    flowey: {
+      x: canvas.width/2,
+      y: 360,
+      baseY: 360,
+      radius: 80,
+      petalCount: 7,
+      faceAngry: 0,
+      alive: true,
+      fallen: false,
+    },
+    souls: [],
+    time: 0,
+    phase: 'intro', // intro, battle, fall, absorb, transform, lord
+    particles: [],
+    audio: null,
+  };
+
+  // WebAudio: simple theme engine (no external audio)
+  const AudioEngine = {
+    ctx: null,
+    master: null,
+    init(){
+      try{
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        this.master = this.ctx.createGain();
+        this.master.gain.value = 0.9;
+        this.master.connect(this.ctx.destination);
+      }catch(e){
+        console.warn('Audio unavailable', e);
+      }
+    },
+    playSlash(){
+      if(!this.ctx) return;
+      const o = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      o.type = 'square';
+      o.frequency.value = 600 + Math.random()*120;
+      g.gain.value = 0.08;
+      o.connect(g); g.connect(this.master);
+      o.start();
+      g.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.12);
+      o.stop(this.ctx.currentTime + 0.13);
+    },
+    playHit(){
+      if(!this.ctx) return;
+      const o = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      o.type = 'sawtooth';
+      o.frequency.value = 180;
+      g.gain.value = 0.12;
+      o.connect(g);
+      g.connect(this.master);
+      o.start();
+      g.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.4);
+      o.stop(this.ctx.currentTime + 0.45);
+    },
+    playTransformTheme(){ // thematic sequence: layered oscillators & drones
+      if(!this.ctx) return;
+      // create drone bass
+      const bass = this.ctx.createOscillator();
+      bass.type = 'sine';
+      bass.frequency.value = 55;
+      const gb = this.ctx.createGain();
+      gb.gain.value = 0.0;
+      bass.connect(gb); gb.connect(this.master);
+      bass.start();
+      gb.gain.linearRampToValueAtTime(0.25, this.ctx.currentTime + 0.6);
+
+      // noisy bell arp
+      const now = this.ctx.currentTime;
+      const notes = [220, 246.94, 196, 261.63, 293.66, 246.94];
+      notes.forEach((n,i) => {
+        const o = this.ctx.createOscillator();
+        o.type = 'triangle';
+        o.frequency.value = n * (1 + (Math.random()*0.02-0.01));
+        const g = this.ctx.createGain();
+        g.gain.value = 0;
+        o.connect(g); g.connect(this.master);
+        o.start(now + 0.2 + i*0.18);
+        g.gain.linearRampToValueAtTime(0.12, now + 0.2 + i*0.18 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.2 + i*0.18 + 0.48);
+        o.stop(now + 0.2 + i*0.18 + 0.6);
+      });
+
+      // flame-like noise
+      const bufferSize = 2*this.ctx.sampleRate;
+      const noiseBuf = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+      const buffData = noiseBuf.getChannelData(0);
+      for (let i=0;i<bufferSize;i++){
+        buffData[i] = (Math.random()*2-1) * Math.exp(-i/bufferSize*5);
+      }
+      const noiseSource = this.ctx.createBufferSource();
+      noiseSource.buffer = noiseBuf;
+      const noiseGain = this.ctx.createGain();
+      noiseGain.gain.value = 0.0;
+      noiseSource.connect(noiseGain); noiseGain.connect(this.master);
+      noiseSource.start(now + 0.25);
+      noiseGain.gain.linearRampToValueAtTime(0.08, now + 0.4);
+      noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 4.4);
+      noiseSource.stop(now + 4.5);
+
+      // schedule bass stop
+      gb.gain.exponentialRampToValueAtTime(0.0001, now + 6);
+      bass.stop(now + 6.1);
+    }
+  };
+
+  // Utility
+  function rand(min, max){ return min + Math.random()*(max-min); }
+  function dist(a,b,c,d){ const dx=a-c, dy=b-d; return Math.sqrt(dx*dx + dy*dy); }
+
+  // Create initial souls (6 colored orbs)
+  function spawnSouls(){
+    state.souls = [];
+    const colors = ['#ff3b3b','#ffb84d','#ff66ea','#66d9ff','#7dff7d','#ffd56b'];
+    for(let i=0;i<state.soulsTotal;i++){
+      const angle = (Math.PI*2)*(i/state.soulsTotal);
+      const r = 260 + rand(-40,40);
+      const cx = canvas.width/2 + Math.cos(angle)*r;
+      const cy = 160 + Math.sin(angle)*40 + rand(-12,12);
+      state.souls.push({
+        id: i,
+        x: cx,
+        y: cy,
+        targetX: cx,
+        targetY: cy,
+        radius: 18,
+        color: colors[i%colors.length],
+        captured: false,
+        behind: true
+      });
+    }
+    state.soulsLeft = state.soulsTotal;
+    soulsLeftEl.textContent = state.soulsLeft;
+  }
+
+  // Particle system (for slashes / sparks)
+  function spawnParticle(x,y,dx,dy,life=0.7){
+    state.particles.push({x,y,dx,dy,life,age:0});
+  }
+
+  // Flowey draw: custom stylized flower (not an Undertale asset)
+  function drawFlowey(f, time){
+    // slight bob
+    const bob = Math.sin(time*1.6)*6;
+    const x = f.x;
+    const y = f.y + bob;
+    // shadow
+    ctx.save();
+    ctx.translate(x,y);
+    // draw shadow ellipse
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(0, f.radius+24, f.radius*0.9, 22, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    // petals
+    const petals = f.petalCount;
+    for(let i=0;i<petals;i++){
+      const a = (i/petals)*Math.PI*2 + time*0.5;
+      const px = x + Math.cos(a) * (f.radius + 6);
+      const py = y + Math.sin(a) * (f.radius + 6);
+      const scale = 1 + 0.06*Math.sin(time*4 + i);
+      ctx.save();
+      ctx.translate(px,py);
+      ctx.rotate(a + Math.PI/6);
+      ctx.scale(scale,scale);
+      // petal gradient
+      const g = ctx.createLinearGradient(-18,-10,18,20);
+      g.addColorStop(0,'#ffb300');
+      g.addColorStop(0.6,'#ff6a00');
+      g.addColorStop(1,'#ffdc60');
+      ctx.fillStyle = g;
+      roundedRect(ctx, -22, -12, 44, 36, 18);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // center face
+    ctx.save();
+    ctx.translate(x,y);
+    // inner circle
+    ctx.beginPath();
+    ctx.arc(0,0,f.radius,0,Math.PI*2);
+    const g2 = ctx.createRadialGradient(-10,-6,8, 0,0,f.radius);
+    g2.addColorStop(0,'#ffef9a');
+    g2.addColorStop(1,'#ffb300');
+    ctx.fillStyle = g2;
+    ctx.fill();
+
+    // face: eyes and mouth that change with 'angry' factor
+    const angry = Math.min(1, state.slashCount / 5);
+    const eyeOffset = 26;
+    // eyes
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.ellipse(-eyeOffset, -6, 10 + 6*angry, 6 - 3*angry, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(eyeOffset, -6, 10 + 6*angry, 6 - 3*angry, 0, 0, Math.PI*2);
+    ctx.fill();
+    // pupils (small)
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-eyeOffset + 2, -6, 3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(eyeOffset - 2, -6, 3, 0, Math.PI*2); ctx.fill();
+
+    // mouth: smile -> grin -> sinister
+    ctx.fillStyle = '#000';
+    const mouthW = 36 + 26*angry;
+    const mouthH = 10 + 14*angry;
+    ctx.save();
+      ctx.translate(0, 20 + 6*angry);
+      ctx.beginPath();
+      ctx.ellipse(0,0,mouthW, mouthH, 0, 0, Math.PI*2);
+      ctx.fill();
+      if(angry > 0.4){
+        // teeth lines
+        ctx.strokeStyle = '#ffef9a';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for(let t=-Math.floor(mouthW/8); t<=Math.floor(mouthW/8); t++){
+          ctx.moveTo(t*8 - 4, -6);
+          ctx.lineTo(t*8 - 4, 6);
+        }
+        ctx.stroke();
+      }
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  // Rounded rectangle util
+  function roundedRect(ctx,x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // Slash detection: click near Flowey center
+  canvas.addEventListener('click', (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (ev.clientX - rect.left) * scaleX;
+    const my = (ev.clientY - rect.top) * scaleY;
+
+    if(state.phase !== 'battle' && state.phase !== 'intro') return;
+    const f = state.flowey;
+    const d = dist(mx,my,f.x,f.y);
+    if(d < f.radius*1.2){
+      // count as slash
+      state.slashCount++;
+      slashCountEl.textContent = state.slashCount;
+      spawnParticle(mx,my, (mx-f.x)/40 + rand(-1,1), (my-f.y)/20 + rand(-1,1), 0.6);
+      AudioEngine.playSlash();
+      centerText.textContent = ["Cut!","Keep slashing!","You're hurting him...","Almost..."][Math.min(3, state.slashCount-1)];
+      if(state.slashCount >= 5){
+        // trigger fall sequence
+        startFallSequence();
+      }
+    } else {
+      // miss - small particle on miss
+      spawnParticle(mx,my, rand(-1,1), rand(-1,1), 0.45);
+    }
+  });
+
+  // Start the fall after 5 slashes
+  function startFallSequence(){
+    if(state.phase === 'fall' || state.phase === 'absorb' || state.phase === 'transform') return;
+    state.phase = 'fall';
+    state.flowey.fallen = true;
+    centerText.textContent = "Flowey trembles... then falls through the floor.";
+    AudioEngine.playHit();
+    // animate fall: move y down over time
+    // schedule next steps
+    setTimeout(() => {
+      state.phase = 'absorb';
+      centerText.textContent = "He absorbs the six human souls...";
+      // begin absorption (pull souls in)
+      AudioEngine.playTransformTheme();
+      // animate captured souls sequentially
+      let i=0;
+      const capInterval = setInterval(()=>{
+        if(i >= state.souls.length){
+          clearInterval(capInterval);
+          // after all absorbed, transform
+          setTimeout(()=> {
+            state.phase = 'transform';
+            centerText.textContent = "Reminded of Chara... Asgore... Toriel... Filled with DETERMINATION.";
+            // finish transform after brief pause
+            setTimeout(()=> {
+              state.phase = 'lord';
+              centerText.textContent = "LORD FLOWEY";
+            }, 1600);
+          }, 800);
+          return;
+        }
+        captureSoul(state.souls[i]);
+        i++;
+      }, 700);
+    }, 800);
+  }
+
+  // Capture soul animation: moves toward Flowey center then 'gone'
+  function captureSoul(s){
+    s.captured = true;
+    s.behind = false;
+    // animate its target toward Flowey center
+    s.targetX = state.flowey.x;
+    s.targetY = state.flowey.y;
+    // mark soulsLeft
+    state.soulsLeft = Math.max(0, state.soulsLeft - 1);
+    soulsLeftEl.textContent = state.soulsLeft;
+    // spawn a flash
+    spawnParticle(s.x, s.y, (state.flowey.x-s.x)/40, (state.flowey.y-s.y)/40, 1.2);
+  }
+
+  // Reset / init
+  function init(){
+    AudioEngine.init();
+    state.slashCount = 0;
+    slashCountEl.textContent = 0;
+    state.phase = 'battle';
+    centerText.textContent = "GENOCIDE FLOWEY — click near the flower to slash";
+    state.time = 0;
+    state.flowey = {
+      x: canvas.width/2,
+      y: 360,
+      baseY: 360,
+      radius: 80,
+      petalCount: 7,
+      faceAngry: 0,
+      alive: true,
+      fallen: false,
+    };
+    spawnSouls();
+    state.particles = [];
+  }
+
+  // update loop
+  function update(dt){
+    state.time += dt;
+    // update particles
+    for(let i=state.particles.length-1;i>=0;i--){
+      const p = state.particles[i];
+      p.age += dt;
+      p.x += p.dx * 60 * dt;
+      p.y += p.dy * 60 * dt;
+      if(p.age > p.life) state.particles.splice(i,1);
+    }
+
+    // if falling: move flowey down
+    if(state.phase === 'fall'){
+      state.flowey.y += 200 * dt; // fall speed
+      if(state.flowey.y > canvas.height + 120){
+        state.flowey.y = canvas.height + 120;
+      }
+    }
+
+    // Souls movement: if captured, move toward target
+    state.souls.forEach(s=>{
+      if(s.captured){
+        // approach target with easing
+        s.x += (s.targetX - s.x) * (2.2 * dt);
+        s.y += (s.targetY - s.y) * (2.2 * dt);
+      } else {
+        // idle slight float
+        s.y += Math.sin(state.time*1.2 + s.id)*0.35;
+      }
+    });
+
+    // Flowey reaction when absorbing: enlarge center, show glow
+    if(state.phase === 'absorb' || state.phase === 'transform' || state.phase === 'lord'){
+      // slight pulsing
+      state.flowey.radius = 80 + 14 * Math.sin(state.time * 6);
+    } else {
+      state.flowey.radius = 80 + 6 * Math.sin(state.time * 1.2);
+    }
+
+    // particles gravity-ish
+    state.particles.forEach(p=>{
+      p.dy += 0.0 * dt;
+    });
+  }
+
+  // Draw loop
+  function draw(){
+    // background
+    ctx.fillStyle = '#060607';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // If LORD phase, draw black void + souls behind
+    if(state.phase === 'lord' || state.phase === 'transform' || state.phase === 'absorb'){
+      // dark gradient
+      const g = ctx.createLinearGradient(0,0,0,canvas.height);
+      g.addColorStop(0,'#000');
+      g.addColorStop(0.4,'#070708');
+      g.addColorStop(1,'#0b0b0d');
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+
+      // aura and flame theme behind: subtle radial gradient
+      const rg = ctx.createRadialGradient(canvas.width/2,canvas.height/2,40, canvas.width/2,canvas.height/2, 900);
+      rg.addColorStop(0,'rgba(255,110,10,0.12)');
+      rg.addColorStop(0.3,'rgba(255,20,50,0.06)');
+      rg.addColorStop(1,'rgba(0,0,0,0.0)');
+      ctx.fillStyle = rg;
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    }
+
+    // souls: when behind, draw behind Flowey (in lord stage they appear behind him)
+    const drawSoulsBehind = (s)=> { // draw a soul orb
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const shimmer = Math.sin(state.time*2 + s.id) * 0.6;
+      // halo
+      const rad = s.radius + 10 + shimmer*6;
+      const halo = ctx.createRadialGradient(s.x,s.y,0,s.x,s.y,rad);
+      halo.addColorStop(0, s.color);
+      halo.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(s.x,s.y,rad,0,Math.PI*2); ctx.fill();
+
+      // orb
+      ctx.beginPath();
+      ctx.arc(s.x,s.y,s.radius,0,Math.PI*2);
+      ctx.fillStyle = s.color;
+      ctx.fill();
+
+      // inner shine
+      ctx.beginPath();
+      ctx.arc(s.x - s.radius*0.3, s.y - s.radius*0.45, s.radius*0.45, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,255,255,0.25)';
+      ctx.fill();
+
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.restore();
+    };
+
+    // Draw souls behind if phase is lord/transform/absorb or souls.behind true
+    state.souls.forEach(s=>{
+      if(s.behind) drawSoulsBehind(s);
+    });
+
+    // ground / platform
+    // dark floor
+    ctx.save();
+    ctx.fillStyle = '#0b0b0d';
+    ctx.fillRect(0, 520, canvas.width, canvas.height-520);
+    // cracks / stylized floor
+    ctx.strokeStyle = 'rgba(255,255,255,0.02)';
+    ctx.lineWidth = 1.2;
+    for(let i=0;i<10;i++){
+      ctx.beginPath();
+      const sx = 60 + i*120;
+      ctx.moveTo(sx,520);
+      ctx.lineTo(sx + Math.sin(state.time*0.8 + i)*40, 520 + Math.cos(state.time*0.6 + i)*18 + 20);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // draw flowey (center)
+    drawFlowey(state.flowey, state.time);
+
+    // If flowey has fallen through floor, show little hole or disappearing effect
+    if(state.phase === 'fall'){
+      ctx.save();
+      const holeY = 520 - 12;
+      ctx.fillStyle = 'rgba(0,0,0,0.9)';
+      ctx.beginPath();
+      ctx.ellipse(state.flowey.x, holeY, 150, 22 + Math.sin(state.time*6)*4, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Draw souls that are not behind (some captured ones become in front)
+    state.souls.forEach(s=>{
+      if(!s.behind) drawSoulsBehind(s);
+    });
+
+    // Draw LORD FLOWEY form if in 'lord' phase
+    if(state.phase === 'lord'){
+      // large menacing central sprite (stylized)
+      ctx.save();
+      ctx.translate(state.flowey.x, state.flowey.y - 20);
+      // dark spiky maw behind
+      for(let i=0;i<12;i++){
+        const a = i/12 * Math.PI*2 + state.time*0.3;
+        ctx.beginPath();
+        ctx.moveTo(0,0);
+        ctx.lineTo(Math.cos(a)*(220 + 20*Math.sin(state.time*3 + i)), Math.sin(a)*(120 + 30*Math.cos(state.time*2 + i)));
+        ctx.lineWidth = 18 - (i%3)*4;
+        ctx.strokeStyle = `rgba(40,10,10, ${0.03 + i*0.03})`;
+        ctx.stroke();
+      }
+      // flaming petals: draw larger petals with inner glow
+      for(let i=0;i<state.flowey.petalCount;i++){
+        const a = i/state.flowey.petalCount * Math.PI*2 + state.time*1.1;
+        const px = Math.cos(a)*160;
+        const py = Math.sin(a)*60;
+        ctx.save();
+        ctx.translate(px,py);
+        ctx.rotate(a);
+        ctx.beginPath();
+        ctx.ellipse(0,0, 80,40, 0, 0, Math.PI*2);
+        const pg = ctx.createLinearGradient(-60,-20,60,40);
+        pg.addColorStop(0,'rgba(255,80,20,0.96)');
+        pg.addColorStop(0.5,'rgba(255,170,80,0.9)');
+        pg.addColorStop(1,'rgba(0,0,0,0.0)');
+        ctx.fillStyle = pg;
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // central face: darker, more angular
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 160, 120, 0, 0, Math.PI*2);
+      const cg = ctx.createRadialGradient(-20,-8,40, 0,0,160);
+      cg.addColorStop(0,'#ffd88a'); cg.addColorStop(0.4,'#ff9b2b'); cg.addColorStop(1,'#6b1608');
+      ctx.fillStyle = cg;
+      ctx.fill();
+
+      // sinister eyes (glowing)
+      ctx.fillStyle = '#000';
+      ctx.beginPath(); ctx.ellipse(-56, -28, 36, 18, 0, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(56, -28, 36, 18, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#ffef9a';
+      ctx.beginPath(); ctx.ellipse(-56 + 6, -28, 10, 6, 0, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(56 - 6, -28, 10, 6, 0, 0, Math.PI*2); ctx.fill();
+
+      // jagged mouth (open maw)
+      ctx.save();
+      ctx.translate(0, 40);
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.moveTo(-110, 0);
+      ctx.quadraticCurveTo(0, 80 + 10*Math.sin(state.time*8), 110, 0);
+      ctx.quadraticCurveTo(0, 40, -110, 0);
+      ctx.fill();
+
+      // teeth
+      ctx.fillStyle = '#ffd88a';
+      for(let t = -100; t <= 100; t += 22){
+        ctx.beginPath();
+        ctx.moveTo(t, 0);
+        ctx.lineTo(t + 12, 16);
+        ctx.lineTo(t + 6, 0);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // overlay of "DETERMINATION" shimmer
+      ctx.restore();
+
+      // Draw energy rings / behind the form: six soul silhouettes behind him
+      const baseX = state.flowey.x;
+      const baseY = state.flowey.y + 40;
+      for(let i=0;i<state.soulsTotal;i++){
+        const a = Math.PI*2*(i/state.soulsTotal) + state.time*0.2;
+        const rx = baseX + Math.cos(a)*240;
+        const ry = baseY - 10 + Math.sin(a)*40;
+        ctx.save();
+        ctx.globalAlpha = 0.95;
+        // glow
+        ctx.beginPath(); ctx.arc(rx,ry,30,0,Math.PI*2);
+        ctx.fillStyle = 'rgba(255,255,255,0.04)';
+        ctx.fill();
+        // soul inner color (use pre-made colors)
+        const colors = ['#ff3b3b','#ffb84d','#ff66ea','#66d9ff','#7dff7d','#ffd56b'];
+        const col = colors[i%colors.length];
+        const g = ctx.createRadialGradient(rx-8,ry-8,2, rx,ry,30);
+        g.addColorStop(0, col);
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(rx,ry,20,0,Math.PI*2); ctx.fill();
+        ctx.restore();
+      }
+
+      // DETERMINATION text
+      ctx.save();
+      ctx.font = '56px "Segoe UI", Roboto, Arial';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffdf7f';
+      ctx.shadowColor = 'rgba(255,140,0,0.8)';
+      ctx.shadowBlur = 22;
+      ctx.fillText('DETERMINATION', canvas.width/2, 110 + Math.sin(state.time*2)*6);
+      ctx.restore();
+    }
+
+    // draw particles for slash hits
+    state.particles.forEach(p=>{
+      const alpha = 1 - (p.age/p.life);
+      ctx.save();
+      ctx.globalAlpha = Math.max(0,alpha);
+      ctx.fillStyle = `rgba(255,255,255,${alpha*0.9})`;
+      ctx.beginPath(); ctx.arc(p.x,p.y, 5 + (1-alpha)*8, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    });
+
+    // small overlay vignette
+    ctx.save();
+    const vg = ctx.createLinearGradient(0,0,0,canvas.height);
+    vg.addColorStop(0,'rgba(0,0,0,0.05)');
+    vg.addColorStop(0.9,'rgba(0,0,0,0.4)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.restore();
+  }
+
+  // Main loop
+  let last = performance.now();
+  function frame(t){
+    const dt = Math.min(0.05, (t - last) / 1000);
+    last = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  // Initialize & start
+  init();
+  requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
