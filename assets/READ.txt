@@ -1,8 +1,0 @@
-Put your PNG images and music files here!<br>
-E.g.:
-- flowey.png
-- lord_flowey.png
-- soul_0.png ... soul_5.png
-- battle_theme.ogg
-
-Reference them in your main.py!
